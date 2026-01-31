@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Random.org API key - set via environment variable
-# Get your free API key at https://api.random.org/
 if [[ -z "$RANDOM_ORG_API_KEY" ]]; then
   echo "Error: RANDOM_ORG_API_KEY environment variable not set"
   echo "Get your free API key at https://api.random.org/"
@@ -9,38 +8,53 @@ if [[ -z "$RANDOM_ORG_API_KEY" ]]; then
 fi
 
 UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+NOTES_PATH="${OM_NOTES_PATH:-$HOME/.om_notes}"
+
+# Terminal state (save early for cleanup)
+ORIG_STTY=$(stty -g 2>/dev/null || echo "")
+
+# State
+SELECTION=0  # 0=none, 1=caminho, 2=sulco, 3=forja
+CAMINHO_NOTES_VISIBLE=0
+SULCO_NOTES_VISIBLE=0
+FORJA_NOTES_VISIBLE=0
+NOTES_SELECTED=0  # 0=quote selected, 1=notes selected (when visible)
+
+# Quote storage
+CAMINHO_QUOTE=""
+SULCO_QUOTE=""
+FORJA_QUOTE=""
+NUM=""
 
 # Use argument if provided, otherwise fetch random number
-if [[ -n "$1" ]]; then
-  if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 1 || "$1" -gt 1055 ]]; then
-    echo "Error: number must be between 1 and 1055"
-    exit 1
-  fi
-  NUM="$1"
-else
-  NUM=$(curl -s "https://api.random.org/json-rpc/4/invoke" \
-    -H "Content-Type: application/json" \
-    -d "{
-      \"jsonrpc\": \"2.0\",
-      \"method\": \"generateIntegers\",
-      \"params\": {
-        \"apiKey\": \"$RANDOM_ORG_API_KEY\",
-        \"n\": 1,
-        \"min\": 1,
-        \"max\": 1055
-      },
-      \"id\": 1
-    }" | jq -r '.result.random.data[0]')
+get_number() {
+  if [[ -n "$1" ]]; then
+    if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 1 || "$1" -gt 1055 ]]; then
+      echo "Error: number must be between 1 and 1055"
+      exit 1
+    fi
+    NUM="$1"
+  else
+    NUM=$(curl -s "https://api.random.org/json-rpc/4/invoke" \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"jsonrpc\": \"2.0\",
+        \"method\": \"generateIntegers\",
+        \"params\": {
+          \"apiKey\": \"$RANDOM_ORG_API_KEY\",
+          \"n\": 1,
+          \"min\": 1,
+          \"max\": 1055
+        },
+        \"id\": 1
+      }" | jq -r '.result.random.data[0]')
 
-  if [[ -z "$NUM" || "$NUM" == "null" ]]; then
-    echo "Failed to get random number"
-    exit 1
+    if [[ -z "$NUM" || "$NUM" == "null" ]]; then
+      echo "Failed to get random number"
+      exit 1
+    fi
   fi
-fi
-
-echo -e "\n\033[1;33m══════════════════════════════════════════════════════════════\033[0m"
-echo -e "\033[1;36m                        № $NUM\033[0m"
-echo -e "\033[1;33m══════════════════════════════════════════════════════════════\033[0m\n"
+}
 
 extract_quote() {
   local html="$1"
@@ -50,45 +64,343 @@ extract_quote() {
     sed 's/&#160;.*//g; s/Este ponto em outro idioma.*//g; s/Documento impresso de.*//g' | \
     sed 's/Temas.*//g' | \
     sed 's/&nbsp;/ /g; s/&mdash;/—/g; s/&ldquo;/"/g; s/&rdquo;/"/g; s/&amp;/\&/g' | \
-    perl -MHTML::Entities -pe 'decode_entities($_);' 2>/dev/null || cat | \
-    fold -s -w 60
+    perl -MHTML::Entities -pe 'decode_entities($_);' 2>/dev/null || cat
 }
 
-# Caminho (max 999)
-echo -e "\033[1;32m┌─ CAMINHO ─────────────────────────────────────────────────┐\033[0m"
-HTML=$(curl -s -A "$UA" "https://escriva.org/pt-br/camino/$NUM/")
-QUOTE=$(extract_quote "$HTML")
-if [[ -n "$QUOTE" && ! "$QUOTE" =~ "404" && ${#QUOTE} -gt 5 ]]; then
-  echo "$QUOTE" | fold -s -w 60 | while IFS= read -r line; do
-    echo -e "\033[0;37m  $line\033[0m"
-  done
-else
-  echo -e "\033[0;90m  (ponto não encontrado)\033[0m"
-fi
-echo -e "\033[1;32m└───────────────────────────────────────────────────────────┘\033[0m\n"
+fetch_quotes() {
+  local html
 
-# Sulco (max 1000)
-echo -e "\033[1;34m┌─ SULCO ────────────────────────────────────────────────────┐\033[0m"
-HTML=$(curl -s -A "$UA" "https://escriva.org/pt-br/surco/$NUM/")
-QUOTE=$(extract_quote "$HTML")
-if [[ -n "$QUOTE" && ! "$QUOTE" =~ "404" && ${#QUOTE} -gt 5 ]]; then
-  echo "$QUOTE" | fold -s -w 60 | while IFS= read -r line; do
-    echo -e "\033[0;37m  $line\033[0m"
-  done
-else
-  echo -e "\033[0;90m  (ponto não encontrado)\033[0m"
-fi
-echo -e "\033[1;34m└───────────────────────────────────────────────────────────┘\033[0m\n"
+  # Caminho (max 999)
+  html=$(curl -s -A "$UA" "https://escriva.org/pt-br/camino/$NUM/")
+  CAMINHO_QUOTE=$(extract_quote "$html")
+  if [[ -z "$CAMINHO_QUOTE" || "$CAMINHO_QUOTE" =~ "404" || ${#CAMINHO_QUOTE} -lt 5 ]]; then
+    CAMINHO_QUOTE=""
+  fi
 
-# Forja (max 1055)
-echo -e "\033[1;35m┌─ FORJA ────────────────────────────────────────────────────┐\033[0m"
-HTML=$(curl -s -A "$UA" "https://escriva.org/pt-br/forja/$NUM/")
-QUOTE=$(extract_quote "$HTML")
-if [[ -n "$QUOTE" && ! "$QUOTE" =~ "404" && ${#QUOTE} -gt 5 ]]; then
-  echo "$QUOTE" | fold -s -w 60 | while IFS= read -r line; do
-    echo -e "\033[0;37m  $line\033[0m"
+  # Sulco (max 1000)
+  html=$(curl -s -A "$UA" "https://escriva.org/pt-br/surco/$NUM/")
+  SULCO_QUOTE=$(extract_quote "$html")
+  if [[ -z "$SULCO_QUOTE" || "$SULCO_QUOTE" =~ "404" || ${#SULCO_QUOTE} -lt 5 ]]; then
+    SULCO_QUOTE=""
+  fi
+
+  # Forja (max 1055)
+  html=$(curl -s -A "$UA" "https://escriva.org/pt-br/forja/$NUM/")
+  FORJA_QUOTE=$(extract_quote "$html")
+  if [[ -z "$FORJA_QUOTE" || "$FORJA_QUOTE" =~ "404" || ${#FORJA_QUOTE} -lt 5 ]]; then
+    FORJA_QUOTE=""
+  fi
+}
+
+# Get notes file path for a book
+notes_file() {
+  local book="$1"
+  printf "%s/%04d_%s.md" "$NOTES_PATH" "$NUM" "$book"
+}
+
+# Load notes content (everything after ---)
+load_notes() {
+  local book="$1"
+  local file
+  file=$(notes_file "$book")
+  if [[ -f "$file" ]]; then
+    sed -n '/^---$/,$ { /^---$/d; p; }' "$file"
+  fi
+}
+
+# Create notes file with header if doesn't exist
+ensure_notes_file() {
+  local book="$1"
+  local quote="$2"
+  local file
+  file=$(notes_file "$book")
+
+  mkdir -p "$NOTES_PATH"
+
+  if [[ ! -f "$file" ]]; then
+    local title
+    case "$book" in
+      caminho) title="Caminho" ;;
+      sulco) title="Sulco" ;;
+      forja) title="Forja" ;;
+    esac
+
+    {
+      echo "# $title № $NUM"
+      echo ""
+      echo "$quote" | fold -s -w 70 | sed 's/^/> /'
+      echo ""
+      echo "---"
+      echo ""
+    } > "$file"
+  fi
+}
+
+# Hardcoded border strings (62 chars wide)
+BORDER_TOP_CAMINHO="┌─ CAMINHO ──────────────────────────────────────────────────┐"
+BORDER_TOP_SULCO="┌─ SULCO ────────────────────────────────────────────────────┐"
+BORDER_TOP_FORJA="┌─ FORJA ────────────────────────────────────────────────────┐"
+BORDER_BOTTOM="└────────────────────────────────────────────────────────────┘"
+NOTES_TOP="  ┌─ notas ────────────────────────────────────────────────┐"
+NOTES_BOTTOM="  └────────────────────────────────────────────────────────┘"
+
+render_quote() {
+  local name="$1"
+  local quote="$2"
+  local color_dim="$3"
+  local color_bright="$4"
+  local highlighted="$5"
+  local notes_visible="$6"
+  local notes_selected="$7"
+  local book_key="$8"
+
+  local frame_color text_color
+  if [[ "$highlighted" == "1" && "$notes_selected" != "1" ]]; then
+    frame_color="$color_bright"
+    text_color="\033[1;37m"
+  else
+    frame_color="$color_dim"
+    text_color="\033[0;37m"
+  fi
+
+  # Top border
+  local top_border
+  case "$name" in
+    CAMINHO) top_border="$BORDER_TOP_CAMINHO" ;;
+    SULCO) top_border="$BORDER_TOP_SULCO" ;;
+    FORJA) top_border="$BORDER_TOP_FORJA" ;;
+  esac
+  echo -e "${frame_color}${top_border}\033[0m"
+
+  # Quote text
+  if [[ -n "$quote" ]]; then
+    echo "$quote" | fold -s -w 60 | while IFS= read -r line; do
+      echo -e "${text_color}  $line\033[0m"
+    done
+  else
+    echo -e "\033[0;90m  (ponto não encontrado)\033[0m"
+  fi
+
+  # Bottom border
+  echo -e "${frame_color}${BORDER_BOTTOM}\033[0m"
+
+  # Render notes if visible
+  if [[ "$notes_visible" == "1" ]]; then
+    local notes_frame_color notes_text_color
+    if [[ "$notes_selected" == "1" ]]; then
+      notes_frame_color="$color_bright"
+      notes_text_color="\033[1;37m"
+    else
+      notes_frame_color="$color_dim"
+      notes_text_color="\033[0;37m"
+    fi
+
+    echo -e "${notes_frame_color}${NOTES_TOP}\033[0m"
+
+    local notes
+    notes=$(load_notes "$book_key")
+    if [[ -n "$notes" ]]; then
+      echo "$notes" | fold -s -w 56 | head -10 | while IFS= read -r line; do
+        echo -e "${notes_text_color}    $line\033[0m"
+      done
+    else
+      echo -e "\033[0;90m    (pressione Enter para adicionar notas)\033[0m"
+    fi
+
+    echo -e "${notes_frame_color}${NOTES_BOTTOM}\033[0m"
+  fi
+
+  echo ""
+}
+
+render_all() {
+  # Clear screen and move cursor to top
+  printf '\033[2J\033[H'
+
+  echo -e "\n\033[1;33m══════════════════════════════════════════════════════════════\033[0m"
+  echo -e "\033[1;36m                        № $NUM\033[0m"
+  echo -e "\033[1;33m══════════════════════════════════════════════════════════════\033[0m\n"
+
+  # Caminho
+  local caminho_highlighted=0 caminho_notes_sel=0
+  [[ $SELECTION -eq 1 ]] && caminho_highlighted=1
+  [[ $SELECTION -eq 1 && $NOTES_SELECTED -eq 1 ]] && caminho_notes_sel=1
+  render_quote "CAMINHO" "$CAMINHO_QUOTE" "\033[1;32m" "\033[1;92m" "$caminho_highlighted" "$CAMINHO_NOTES_VISIBLE" "$caminho_notes_sel" "caminho"
+
+  # Sulco
+  local sulco_highlighted=0 sulco_notes_sel=0
+  [[ $SELECTION -eq 2 ]] && sulco_highlighted=1
+  [[ $SELECTION -eq 2 && $NOTES_SELECTED -eq 1 ]] && sulco_notes_sel=1
+  render_quote "SULCO" "$SULCO_QUOTE" "\033[1;34m" "\033[1;94m" "$sulco_highlighted" "$SULCO_NOTES_VISIBLE" "$sulco_notes_sel" "sulco"
+
+  # Forja
+  local forja_highlighted=0 forja_notes_sel=0
+  [[ $SELECTION -eq 3 ]] && forja_highlighted=1
+  [[ $SELECTION -eq 3 && $NOTES_SELECTED -eq 1 ]] && forja_notes_sel=1
+  render_quote "FORJA" "$FORJA_QUOTE" "\033[1;35m" "\033[1;95m" "$forja_highlighted" "$FORJA_NOTES_VISIBLE" "$forja_notes_sel" "forja"
+
+  echo -e "\033[0;90m  ↑↓ navegar  Enter selecionar/editar  q sair\033[0m"
+}
+
+# Get notes visibility for current selection
+get_notes_visible() {
+  case $SELECTION in
+    1) echo "$CAMINHO_NOTES_VISIBLE" ;;
+    2) echo "$SULCO_NOTES_VISIBLE" ;;
+    3) echo "$FORJA_NOTES_VISIBLE" ;;
+    *) echo "0" ;;
+  esac
+}
+
+# Toggle notes visibility for current selection
+toggle_notes() {
+  case $SELECTION in
+    1) CAMINHO_NOTES_VISIBLE=$((1 - CAMINHO_NOTES_VISIBLE)) ;;
+    2) SULCO_NOTES_VISIBLE=$((1 - SULCO_NOTES_VISIBLE)) ;;
+    3) FORJA_NOTES_VISIBLE=$((1 - FORJA_NOTES_VISIBLE)) ;;
+  esac
+}
+
+# Get book key for current selection
+get_book_key() {
+  case $SELECTION in
+    1) echo "caminho" ;;
+    2) echo "sulco" ;;
+    3) echo "forja" ;;
+  esac
+}
+
+# Get quote for current selection
+get_current_quote() {
+  case $SELECTION in
+    1) echo "$CAMINHO_QUOTE" ;;
+    2) echo "$SULCO_QUOTE" ;;
+    3) echo "$FORJA_QUOTE" ;;
+  esac
+}
+
+# Navigation: move down
+move_down() {
+  if [[ $SELECTION -eq 0 ]]; then
+    SELECTION=1
+    NOTES_SELECTED=0
+  elif [[ $NOTES_SELECTED -eq 0 ]]; then
+    # On a quote, check if notes are visible
+    local notes_vis
+    notes_vis=$(get_notes_visible)
+    if [[ "$notes_vis" == "1" ]]; then
+      # Move to notes section
+      NOTES_SELECTED=1
+    else
+      # Move to next quote
+      SELECTION=$((SELECTION % 3 + 1))
+    fi
+  else
+    # On notes, move to next quote
+    NOTES_SELECTED=0
+    SELECTION=$((SELECTION % 3 + 1))
+  fi
+}
+
+# Navigation: move up
+move_up() {
+  if [[ $SELECTION -eq 0 ]]; then
+    SELECTION=3
+    NOTES_SELECTED=0
+    # If Forja notes visible, select them
+    [[ $FORJA_NOTES_VISIBLE -eq 1 ]] && NOTES_SELECTED=1
+  elif [[ $NOTES_SELECTED -eq 1 ]]; then
+    # On notes, move up to quote
+    NOTES_SELECTED=0
+  else
+    # On quote, move to previous
+    SELECTION=$(( (SELECTION - 2 + 3) % 3 + 1 ))
+    # Check if that quote has notes visible
+    local notes_vis
+    notes_vis=$(get_notes_visible)
+    if [[ "$notes_vis" == "1" ]]; then
+      NOTES_SELECTED=1
+    fi
+  fi
+}
+
+# Handle Enter key
+handle_enter() {
+  if [[ $SELECTION -eq 0 ]]; then
+    return
+  fi
+
+  if [[ $NOTES_SELECTED -eq 0 ]]; then
+    # On quote: toggle notes visibility
+    toggle_notes
+  else
+    # On notes: open editor
+    local book quote file
+    book=$(get_book_key)
+    quote=$(get_current_quote)
+    file=$(notes_file "$book")
+
+    ensure_notes_file "$book" "$quote"
+
+    # Restore terminal before editor
+    stty "$ORIG_STTY"
+    printf '\033[?25h'  # Show cursor
+
+    ${EDITOR:-vim} "$file"
+
+    # Restore TUI terminal mode
+    printf '\033[?25l'  # Hide cursor
+    stty -icanon -echo
+  fi
+}
+
+cleanup() {
+  [[ -n "$ORIG_STTY" ]] && stty "$ORIG_STTY"
+  printf '\033[?25h'  # Show cursor
+  echo ""
+  exit 0
+}
+
+main() {
+  get_number "$1"
+
+  echo "Loading quotes..."
+  fetch_quotes
+
+  trap cleanup EXIT INT TERM
+
+  # Hide cursor
+  printf '\033[?25l'
+
+  render_all
+
+  # Set terminal for single-char input without echo
+  stty -icanon -echo
+
+  while true; do
+    # Read a single character
+    local char
+    IFS= read -rsn1 char
+
+    case "$char" in
+      q|Q)
+        break
+        ;;
+      $'\x1b')
+        # Escape sequence - read more
+        IFS= read -rsn2 seq
+        case "$seq" in
+          '[A') move_up; render_all ;;    # Up arrow
+          '[B') move_down; render_all ;;  # Down arrow
+        esac
+        ;;
+      $'\r'|$'\n'|'')
+        # Enter key
+        handle_enter
+        render_all
+        ;;
+    esac
   done
-else
-  echo -e "\033[0;90m  (ponto não encontrado)\033[0m"
-fi
-echo -e "\033[1;35m└───────────────────────────────────────────────────────────┘\033[0m\n"
+}
+
+main "$@"
