@@ -1,12 +1,5 @@
 #!/bin/bash
 
-# Random.org API key - set via environment variable
-if [[ -z "$RANDOM_ORG_API_KEY" ]]; then
-  echo "Error: RANDOM_ORG_API_KEY environment variable not set"
-  echo "Get your free API key at https://api.random.org/"
-  exit 1
-fi
-
 UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 NOTES_PATH="${OM_NOTES_PATH:-$HOME/.om_notes}"
 
@@ -26,16 +19,11 @@ SULCO_QUOTE=""
 FORJA_QUOTE=""
 NUM=""
 
-# Use argument if provided, otherwise fetch random number
-get_number() {
-  if [[ -n "$1" ]]; then
-    if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 1 || "$1" -gt 1055 ]]; then
-      echo "Error: number must be between 1 and 1055"
-      exit 1
-    fi
-    NUM="$1"
-  else
-    NUM=$(curl -s "https://api.random.org/json-rpc/4/invoke" \
+# Get random number: tries random.org API first, falls back to $RANDOM
+get_random_number() {
+  if [[ -n "$RANDOM_ORG_API_KEY" ]]; then
+    local result
+    result=$(curl -s --connect-timeout 3 "https://api.random.org/json-rpc/4/invoke" \
       -H "Content-Type: application/json" \
       -d "{
         \"jsonrpc\": \"2.0\",
@@ -47,12 +35,27 @@ get_number() {
           \"max\": 1055
         },
         \"id\": 1
-      }" | jq -r '.result.random.data[0]')
+      }" 2>/dev/null | jq -r '.result.random.data[0]' 2>/dev/null)
 
-    if [[ -z "$NUM" || "$NUM" == "null" ]]; then
-      echo "Failed to get random number"
+    if [[ -n "$result" && "$result" != "null" && "$result" =~ ^[0-9]+$ ]]; then
+      echo "$result"
+      return
+    fi
+  fi
+  # Fallback to bash RANDOM
+  echo $(( RANDOM % 1055 + 1 ))
+}
+
+# Use argument if provided, otherwise fetch random number
+get_number() {
+  if [[ -n "$1" ]]; then
+    if ! [[ "$1" =~ ^[0-9]+$ ]] || [[ "$1" -lt 1 || "$1" -gt 1055 ]]; then
+      echo "Error: number must be between 1 and 1055"
       exit 1
     fi
+    NUM="$1"
+  else
+    NUM=$(get_random_number)
   fi
 }
 

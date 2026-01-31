@@ -9,16 +9,17 @@ Fetches a random point (1-1055) from:
 
 ## Setup
 
-1. Get a free API key from [random.org](https://api.random.org/)
-2. Set the environment variable:
-   ```bash
-   export RANDOM_ORG_API_KEY="your-api-key"
-   ```
-3. Make executable and run:
-   ```bash
-   chmod +x om
-   ./om
-   ```
+```bash
+chmod +x om
+./om
+```
+
+Optionally, for true randomness via [random.org](https://api.random.org/):
+```bash
+export RANDOM_ORG_API_KEY="your-api-key"
+```
+
+Without the API key, the script falls back to bash's `$RANDOM`.
 
 Optionally specify a point number directly:
 ```bash
