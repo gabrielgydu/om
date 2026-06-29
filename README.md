@@ -26,6 +26,41 @@ Optionally specify a point number directly:
 ./om 42
 ```
 
+## Single-book mode
+
+Run with a book name to draw a random point from just that book and read it in
+context — the previous point, the point itself, and the next point:
+
+```bash
+./om caminho   # The Way    (points 1–999)
+./om sulco     # Furrow     (points 1–1000)
+./om forja     # The Forge  (points 1–1055)
+```
+
+The central point is highlighted; the neighbors are dimmed. This is the same
+interactive TUI as the default view — navigate with ↑/↓ and attach notes to any
+of the three points (see below). Notes are keyed by point number, so a note you
+add here shows up for that same point in the default view too.
+
+```
+══════════════════════════════════════════════════════════════
+                        CAMINHO № 173
+══════════════════════════════════════════════════════════════
+
+┌─ CAMINHO № 172 · anterior ─────────────────────────────────┐
+  Se não te mortificas, nunca serás alma de oração.
+└────────────────────────────────────────────────────────────┘
+
+┌─ CAMINHO № 173 ────────────────────────────────────────────┐
+  Essa frase feliz, a piada que não te escapou da boca...
+└────────────────────────────────────────────────────────────┘
+
+┌─ CAMINHO № 174 · próximo ──────────────────────────────────┐
+  Não digas: essa pessoa me aborrece. - Pensa: essa pessoa me
+  santifica.
+└────────────────────────────────────────────────────────────┘
+```
+
 ## Interactive Mode
 
 The script runs as an interactive TUI:

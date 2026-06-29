@@ -1,5 +1,20 @@
 #!/bin/bash
 
+# The TUI draws box borders and centers headers using ${#str} and fold, which
+# only count characters (not bytes) under a UTF-8 locale. If the inherited
+# locale isn't UTF-8, switch to one when available; otherwise carry on (borders
+# may render a few columns short under a non-UTF-8 locale, but nothing breaks).
+_cur="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+if [[ "${_cur,,}" != *utf-8* && "${_cur,,}" != *utf8* ]]; then
+  for _loc in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8; do
+    if locale -a 2>/dev/null | grep -qixF "$_loc"; then
+      export LC_ALL="$_loc"
+      break
+    fi
+  done
+fi
+unset _cur _loc
+
 UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 NOTES_PATH="$OM_NOTES_PATH"
 if [[ -z "$NOTES_PATH" ]]; then
@@ -12,26 +27,32 @@ HISTORY_FILE="$CACHE_DIR/history.log"
 # Terminal state (save early for cleanup)
 ORIG_STTY=$(stty -g 2>/dev/null || echo "")
 
-# State
-SELECTION=0  # 0=none, 1=caminho, 2=sulco, 3=forja
-CAMINHO_NOTES_VISIBLE=0
-SULCO_NOTES_VISIBLE=0
-FORJA_NOTES_VISIBLE=0
+# TUI state. The viewer shows three slots (SELECTION 1..3, 0=none); each slot
+# is a (book, number) pair. Both views reuse it: the default/history view shows
+# three books at one number; the single-book view shows one book at three
+# consecutive numbers.
+SELECTION=0       # 0=none, 1..3 = slot index
 NOTES_SELECTED=0  # 0=quote selected, 1=notes selected (when visible)
+NUM=""            # primary point number (header + history)
+VIEW_HEADER=""    # centered title line for the current view
 
-# Quote storage
-CAMINHO_QUOTE=""
-SULCO_QUOTE=""
-FORJA_QUOTE=""
-NUM=""
+# Per-slot arrays (slot N ↔ SELECTION N ↔ array index N-1)
+SLOT_BOOKS=()         # book key per slot
+SLOT_NUMS=()          # point number per slot
+SLOT_QUOTES=()        # fetched quote text per slot
+SLOT_NOTES_VISIBLE=() # 0/1 notes-expanded flag per slot
+SLOT_TITLE=()         # box title label per slot
+SLOT_DIM=()           # dim frame color per slot
+SLOT_BRIGHT=()        # bright frame color per slot
 
 # History menu state
 HISTORY_ENTRIES=()   # each item: "epoch\tnum"
 HISTORY_SEL=0        # highlighted row index
 HISTORY_SELECTED=""  # number chosen by the user (empty = cancelled)
 
-# Get random number: tries random.org API first, falls back to $RANDOM
+# Get random number in [1, max]: tries random.org API first, falls back to $RANDOM
 get_random_number() {
+  local max="${1:-1055}"
   if [[ -n "$RANDOM_ORG_API_KEY" ]]; then
     local result
     result=$(curl -s --connect-timeout 3 "https://api.random.org/json-rpc/4/invoke" \
@@ -43,7 +64,7 @@ get_random_number() {
           \"apiKey\": \"$RANDOM_ORG_API_KEY\",
           \"n\": 1,
           \"min\": 1,
-          \"max\": 1055
+          \"max\": $max
         },
         \"id\": 1
       }" 2>/dev/null | jq -r '.result.random.data[0]' 2>/dev/null)
@@ -54,7 +75,27 @@ get_random_number() {
     fi
   fi
   # Fallback to bash RANDOM
-  echo $(( RANDOM % 1055 + 1 ))
+  echo $(( RANDOM % max + 1 ))
+}
+
+# Max point number per book
+book_max() {
+  case "$1" in
+    caminho) echo 999 ;;
+    sulco)   echo 1000 ;;
+    forja)   echo 1055 ;;
+    *)       echo 1055 ;;
+  esac
+}
+
+# Build the escriva.org URL for a book + number
+book_url() {
+  local book="$1" num="$2"
+  case "$book" in
+    caminho) echo "https://escriva.org/pt-br/camino/$num/" ;;
+    sulco)   echo "https://escriva.org/pt-br/surco/$num/" ;;
+    forja)   echo "https://escriva.org/pt-br/forja/$num/" ;;
+  esac
 }
 
 # Use argument if provided, otherwise fetch random number
@@ -108,16 +149,18 @@ extract_quote() {
     perl -MHTML::Entities -pe 'decode_entities($_);' 2>/dev/null || cat
 }
 
-fetch_quote_single() {
-  local book="$1" url="$2"
-  local cached quote html
+# Fetch a single quote for a book + number (cache-aware). Empty if not found.
+fetch_quote_num() {
+  local book="$1" num="$2"
+  local cached quote html url
 
-  cached=$(get_cached_quote "$book" "$NUM")
+  cached=$(get_cached_quote "$book" "$num")
   if [[ -n "$cached" ]]; then
     echo "$cached"
     return
   fi
 
+  url=$(book_url "$book" "$num")
   html=$(curl -s -A "$UA" "$url")
   quote=$(extract_quote "$html")
 
@@ -126,27 +169,28 @@ fetch_quote_single() {
     return
   fi
 
-  save_to_cache "$book" "$NUM" "$quote"
+  save_to_cache "$book" "$num" "$quote"
   echo "$quote"
 }
 
 fetch_quotes() {
-  CAMINHO_QUOTE=$(fetch_quote_single "caminho" "https://escriva.org/pt-br/camino/$NUM/")
-  SULCO_QUOTE=$(fetch_quote_single "sulco" "https://escriva.org/pt-br/surco/$NUM/")
-  FORJA_QUOTE=$(fetch_quote_single "forja" "https://escriva.org/pt-br/forja/$NUM/")
+  local i
+  for i in 0 1 2; do
+    SLOT_QUOTES[$i]=$(fetch_quote_num "${SLOT_BOOKS[$i]}" "${SLOT_NUMS[$i]}")
+  done
 }
 
-# Get notes file path for a book
+# Get notes file path for a book + number
 notes_file() {
-  local book="$1"
-  printf "%s/%04d_%s.md" "$NOTES_PATH" "$NUM" "$book"
+  local book="$1" num="$2"
+  printf "%s/%04d_%s.md" "$NOTES_PATH" "$num" "$book"
 }
 
 # Load notes content (everything after ---)
 load_notes() {
-  local book="$1"
+  local book="$1" num="$2"
   local file
-  file=$(notes_file "$book")
+  file=$(notes_file "$book" "$num")
   if [[ -f "$file" ]]; then
     sed -n '/^---$/,$ { /^---$/d; p; }' "$file"
   fi
@@ -154,10 +198,9 @@ load_notes() {
 
 # Create notes file with header if doesn't exist
 ensure_notes_file() {
-  local book="$1"
-  local quote="$2"
+  local book="$1" num="$2" quote="$3"
   local file
-  file=$(notes_file "$book")
+  file=$(notes_file "$book" "$num")
 
   mkdir -p "$NOTES_PATH"
 
@@ -170,7 +213,7 @@ ensure_notes_file() {
     esac
 
     {
-      echo "# $title № $NUM"
+      echo "# $title № $num"
       echo ""
       echo "$quote" | fold -s -w 70 | sed 's/^/> /'
       echo ""
@@ -180,16 +223,13 @@ ensure_notes_file() {
   fi
 }
 
-# Hardcoded border strings (62 chars wide)
-BORDER_TOP_CAMINHO="┌─ CAMINHO ──────────────────────────────────────────────────┐"
-BORDER_TOP_SULCO="┌─ SULCO ────────────────────────────────────────────────────┐"
-BORDER_TOP_FORJA="┌─ FORJA ────────────────────────────────────────────────────┐"
+# Static border strings (62 cols; top borders are built per-box by seq_border_top)
 BORDER_BOTTOM="└────────────────────────────────────────────────────────────┘"
 NOTES_TOP="  ┌─ notas ────────────────────────────────────────────────┐"
 NOTES_BOTTOM="  └────────────────────────────────────────────────────────┘"
 
 render_quote() {
-  local name="$1"
+  local title="$1"
   local quote="$2"
   local color_dim="$3"
   local color_bright="$4"
@@ -197,6 +237,7 @@ render_quote() {
   local notes_visible="$6"
   local notes_selected="$7"
   local book_key="$8"
+  local num="$9"
 
   local frame_color text_color
   if [[ "$highlighted" == "1" && "$notes_selected" != "1" ]]; then
@@ -207,19 +248,15 @@ render_quote() {
     text_color="\033[0;37m"
   fi
 
-  # Top border
-  local top_border
-  case "$name" in
-    CAMINHO) top_border="$BORDER_TOP_CAMINHO" ;;
-    SULCO) top_border="$BORDER_TOP_SULCO" ;;
-    FORJA) top_border="$BORDER_TOP_FORJA" ;;
-  esac
-  echo -e "${frame_color}${top_border}\033[0m"
+  # Top border (label embedded, 62 cols)
+  echo -e "${frame_color}$(seq_border_top "$title")\033[0m"
 
   # Quote text
   if [[ -n "$quote" ]]; then
     echo "$quote" | fold -s -w 60 | while IFS= read -r line; do
-      echo -e "${text_color}  $line\033[0m"
+      # %b expands the color escapes; %s prints content literally so backslash
+      # sequences in the text aren't interpreted by echo -e
+      printf '%b  %s\033[0m\n' "$text_color" "$line"
     done
   else
     echo -e "\033[0;90m  (ponto não encontrado)\033[0m"
@@ -242,10 +279,11 @@ render_quote() {
     echo -e "${notes_frame_color}${NOTES_TOP}\033[0m"
 
     local notes
-    notes=$(load_notes "$book_key")
+    notes=$(load_notes "$book_key" "$num")
     if [[ -n "$notes" ]]; then
       echo "$notes" | fold -s -w 56 | while IFS= read -r line; do
-        echo -e "${notes_text_color}    $line\033[0m"
+        # %s keeps user-authored note text literal (backslashes, \c, etc.)
+        printf '%b    %s\033[0m\n' "$notes_text_color" "$line"
       done
     else
       echo -e "\033[0;90m    (pressione Enter para adicionar notas)\033[0m"
@@ -261,66 +299,59 @@ render_all() {
   # Clear screen and move cursor to top
   printf '\033[2J\033[H'
 
+  # Centered header
+  local pad spaces
+  pad=$(( (62 - ${#VIEW_HEADER}) / 2 ))
+  (( pad < 0 )) && pad=0
+  printf -v spaces '%*s' "$pad" ""
   echo -e "\n\033[1;33m══════════════════════════════════════════════════════════════\033[0m"
-  echo -e "\033[1;36m                        № $NUM\033[0m"
+  echo -e "\033[1;36m${spaces}${VIEW_HEADER}\033[0m"
   echo -e "\033[1;33m══════════════════════════════════════════════════════════════\033[0m\n"
 
-  # Caminho
-  local caminho_highlighted=0 caminho_notes_sel=0
-  [[ $SELECTION -eq 1 ]] && caminho_highlighted=1
-  [[ $SELECTION -eq 1 && $NOTES_SELECTED -eq 1 ]] && caminho_notes_sel=1
-  render_quote "CAMINHO" "$CAMINHO_QUOTE" "\033[1;32m" "\033[1;92m" "$caminho_highlighted" "$CAMINHO_NOTES_VISIBLE" "$caminho_notes_sel" "caminho"
-
-  # Sulco
-  local sulco_highlighted=0 sulco_notes_sel=0
-  [[ $SELECTION -eq 2 ]] && sulco_highlighted=1
-  [[ $SELECTION -eq 2 && $NOTES_SELECTED -eq 1 ]] && sulco_notes_sel=1
-  render_quote "SULCO" "$SULCO_QUOTE" "\033[1;34m" "\033[1;94m" "$sulco_highlighted" "$SULCO_NOTES_VISIBLE" "$sulco_notes_sel" "sulco"
-
-  # Forja
-  local forja_highlighted=0 forja_notes_sel=0
-  [[ $SELECTION -eq 3 ]] && forja_highlighted=1
-  [[ $SELECTION -eq 3 && $NOTES_SELECTED -eq 1 ]] && forja_notes_sel=1
-  render_quote "FORJA" "$FORJA_QUOTE" "\033[1;35m" "\033[1;95m" "$forja_highlighted" "$FORJA_NOTES_VISIBLE" "$forja_notes_sel" "forja"
+  local i slot highlighted notes_sel
+  for i in 0 1 2; do
+    slot=$(( i + 1 ))
+    highlighted=0; notes_sel=0
+    [[ $SELECTION -eq $slot ]] && highlighted=1
+    [[ $SELECTION -eq $slot && $NOTES_SELECTED -eq 1 ]] && notes_sel=1
+    render_quote "${SLOT_TITLE[$i]}" "${SLOT_QUOTES[$i]}" "${SLOT_DIM[$i]}" "${SLOT_BRIGHT[$i]}" \
+      "$highlighted" "${SLOT_NOTES_VISIBLE[$i]}" "$notes_sel" "${SLOT_BOOKS[$i]}" "${SLOT_NUMS[$i]}"
+  done
 
   echo -e "\033[0;90m  ↑↓ navegar  Enter selecionar/editar  q sair\033[0m"
 }
 
+# Whether a slot is currently selected (1..3)
+slot_selected() {
+  [[ $SELECTION -ge 1 && $SELECTION -le 3 ]]
+}
+
 # Get notes visibility for current selection
 get_notes_visible() {
-  case $SELECTION in
-    1) echo "$CAMINHO_NOTES_VISIBLE" ;;
-    2) echo "$SULCO_NOTES_VISIBLE" ;;
-    3) echo "$FORJA_NOTES_VISIBLE" ;;
-    *) echo "0" ;;
-  esac
+  if slot_selected; then echo "${SLOT_NOTES_VISIBLE[$((SELECTION-1))]}"; else echo "0"; fi
 }
 
 # Toggle notes visibility for current selection
 toggle_notes() {
-  case $SELECTION in
-    1) CAMINHO_NOTES_VISIBLE=$((1 - CAMINHO_NOTES_VISIBLE)) ;;
-    2) SULCO_NOTES_VISIBLE=$((1 - SULCO_NOTES_VISIBLE)) ;;
-    3) FORJA_NOTES_VISIBLE=$((1 - FORJA_NOTES_VISIBLE)) ;;
-  esac
+  if slot_selected; then
+    local i=$((SELECTION-1))
+    SLOT_NOTES_VISIBLE[$i]=$(( 1 - ${SLOT_NOTES_VISIBLE[$i]} ))
+  fi
 }
 
 # Get book key for current selection
 get_book_key() {
-  case $SELECTION in
-    1) echo "caminho" ;;
-    2) echo "sulco" ;;
-    3) echo "forja" ;;
-  esac
+  slot_selected && echo "${SLOT_BOOKS[$((SELECTION-1))]}"
 }
 
 # Get quote for current selection
 get_current_quote() {
-  case $SELECTION in
-    1) echo "$CAMINHO_QUOTE" ;;
-    2) echo "$SULCO_QUOTE" ;;
-    3) echo "$FORJA_QUOTE" ;;
-  esac
+  slot_selected && echo "${SLOT_QUOTES[$((SELECTION-1))]}"
+}
+
+# Get point number for current selection
+get_current_num() {
+  slot_selected && echo "${SLOT_NUMS[$((SELECTION-1))]}"
 }
 
 # Navigation: move down
@@ -351,8 +382,8 @@ move_up() {
   if [[ $SELECTION -eq 0 ]]; then
     SELECTION=3
     NOTES_SELECTED=0
-    # If Forja notes visible, select them
-    [[ $FORJA_NOTES_VISIBLE -eq 1 ]] && NOTES_SELECTED=1
+    # If the last slot's notes are visible, select them
+    [[ ${SLOT_NOTES_VISIBLE[2]} -eq 1 ]] && NOTES_SELECTED=1
   elif [[ $NOTES_SELECTED -eq 1 ]]; then
     # On notes, move up to quote
     NOTES_SELECTED=0
@@ -379,12 +410,13 @@ handle_enter() {
     toggle_notes
   else
     # On notes: open editor
-    local book quote file
+    local book quote num file
     book=$(get_book_key)
     quote=$(get_current_quote)
-    file=$(notes_file "$book")
+    num=$(get_current_num)
+    file=$(notes_file "$book" "$num")
 
-    ensure_notes_file "$book" "$quote"
+    ensure_notes_file "$book" "$num" "$quote"
 
     # Restore terminal before editor
     stty "$ORIG_STTY"
@@ -448,7 +480,7 @@ history_menu() {
 
   while true; do
     local char seq
-    IFS= read -rsn1 char
+    IFS= read -rsn1 char || return
     case "$char" in
       q|Q)
         return
@@ -468,6 +500,71 @@ history_menu() {
         ;;
     esac
   done
+}
+
+# Build a 62-column top border with an embedded label
+seq_border_top() {
+  local label="$1"
+  local prefix="─ ${label} "
+  local dashes=$(( 60 - ${#prefix} ))
+  (( dashes < 0 )) && dashes=0
+  local fill="" i
+  for (( i = 0; i < dashes; i++ )); do fill+="─"; done
+  printf '┌%s%s┐' "$prefix" "$fill"
+}
+
+# Slot colors per book: dim and bright frame colors
+book_colors() {
+  case "$1" in
+    caminho) echo "\033[1;32m \033[1;92m" ;;
+    sulco)   echo "\033[1;34m \033[1;94m" ;;
+    forja)   echo "\033[1;35m \033[1;95m" ;;
+    *)       echo "\033[1;37m \033[1;97m" ;;
+  esac
+}
+
+# Default/history view: the three books at one number ($NUM must be set)
+setup_three_books() {
+  local book dim bright
+  SLOT_BOOKS=("caminho" "sulco" "forja")
+  SLOT_NUMS=("$NUM" "$NUM" "$NUM")
+  SLOT_TITLE=("CAMINHO" "SULCO" "FORJA")
+  SLOT_DIM=(); SLOT_BRIGHT=()
+  for book in "${SLOT_BOOKS[@]}"; do
+    read -r dim bright <<< "$(book_colors "$book")"
+    SLOT_DIM+=("$dim"); SLOT_BRIGHT+=("$bright")
+  done
+  SLOT_NOTES_VISIBLE=(0 0 0)
+  VIEW_HEADER="№ $NUM"
+  SELECTION=0  # nothing focused until the user navigates
+}
+
+# Single-book view (om caminho|sulco|forja): a random point and its neighbors
+setup_sequence() {
+  local book="$1"
+  local title max dim bright prev next
+  case "$book" in
+    caminho) title="CAMINHO" ;;
+    sulco)   title="SULCO" ;;
+    forja)   title="FORJA" ;;
+  esac
+  max=$(book_max "$book")
+
+  # Pick a number whose previous and next neighbors both exist
+  NUM=$(get_random_number "$max")
+  (( NUM < 2 )) && NUM=2
+  (( NUM > max - 1 )) && NUM=$(( max - 1 ))
+  prev=$(( NUM - 1 )); next=$(( NUM + 1 ))
+
+  read -r dim bright <<< "$(book_colors "$book")"
+  SLOT_BOOKS=("$book" "$book" "$book")
+  SLOT_NUMS=("$prev" "$NUM" "$next")
+  SLOT_TITLE=("$title № $prev · anterior" "$title № $NUM" "$title № $next · próximo")
+  SLOT_DIM=("$dim" "$dim" "$dim")
+  SLOT_BRIGHT=("$bright" "$bright" "$bright")
+  SLOT_NOTES_VISIBLE=(0 0 0)
+  VIEW_HEADER="$title № $NUM"
+  SELECTION=2  # open focused on the central point
 }
 
 cleanup() {
@@ -491,9 +588,10 @@ run_viewer() {
   stty -icanon -echo
 
   while true; do
-    # Read a single character
+    # Read a single character; EOF (e.g. Ctrl-D) exits cleanly instead of
+    # looping forever on the empty-string (Enter) case
     local char
-    IFS= read -rsn1 char
+    IFS= read -rsn1 char || break
 
     case "$char" in
       q|Q)
@@ -524,11 +622,17 @@ main() {
       # Nothing chosen: restore terminal and quit
       [[ -z "$HISTORY_SELECTED" ]] && exit 0
       NUM="$HISTORY_SELECTED"
+      setup_three_books
+      ;;
+    caminho|sulco|forja)
+      trap cleanup EXIT INT TERM
+      setup_sequence "$1"
       ;;
     *)
       # get_number may exit 1 on bad input; set trap afterwards
       get_number "$1"
       trap cleanup EXIT INT TERM
+      setup_three_books
       ;;
   esac
 
