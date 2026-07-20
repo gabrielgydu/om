@@ -539,9 +539,10 @@ setup_three_books() {
   SELECTION=0  # nothing focused until the user navigates
 }
 
-# Single-book view (om caminho|sulco|forja): a random point and its neighbors
+# Single-book view (om caminho|sulco|forja [num]): a chosen or random point and
+# its neighbors. May exit 1 on an out-of-range number, so call before the trap.
 setup_sequence() {
-  local book="$1"
+  local book="$1" arg="$2"
   local title max dim bright prev next
   case "$book" in
     caminho) title="CAMINHO" ;;
@@ -550,8 +551,17 @@ setup_sequence() {
   esac
   max=$(book_max "$book")
 
-  # Pick a number whose previous and next neighbors both exist
-  NUM=$(get_random_number "$max")
+  # Use the given number if valid, otherwise pick a random point
+  if [[ -n "$arg" ]]; then
+    if ! [[ "$arg" =~ ^[0-9]+$ ]] || (( arg < 1 || arg > max )); then
+      echo "Error: number must be between 1 and $max for $book"
+      exit 1
+    fi
+    NUM="$arg"
+  else
+    NUM=$(get_random_number "$max")
+  fi
+  # Clamp so previous and next neighbors both exist
   (( NUM < 2 )) && NUM=2
   (( NUM > max - 1 )) && NUM=$(( max - 1 ))
   prev=$(( NUM - 1 )); next=$(( NUM + 1 ))
@@ -625,8 +635,9 @@ main() {
       setup_three_books
       ;;
     caminho|sulco|forja)
+      # setup_sequence may exit 1 on a bad number; set trap afterwards
+      setup_sequence "$1" "$2"
       trap cleanup EXIT INT TERM
-      setup_sequence "$1"
       ;;
     *)
       # get_number may exit 1 on bad input; set trap afterwards
